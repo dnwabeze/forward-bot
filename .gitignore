@@ -1,0 +1,9 @@
+.env
+*.session
+*.session-journal
+seen_cas.txt
+__pycache__/
+*.pyc
+.venv/
+whatsapp_monitor/wa_session/
+whatsapp_monitor/node_modules/
