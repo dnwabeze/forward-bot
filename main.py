@@ -1,5 +1,9 @@
 import asyncio
 import logging
+import subprocess
+import os
+import sys
+import signal
 
 from telethon import TelegramClient, events
 from telethon.tl.types import Channel, Chat
@@ -143,6 +147,45 @@ def register_handler(
                 log.error(f"[SEND-FAIL] {ca}: {e} — will retry on next occurrence")
 
 
+# ── Node Monitor ───────────────────────────────────────────────────────────────
+
+def start_node_monitor():
+    """Spawns the Node.js WhatsApp monitor in a background process."""
+    monitor_dir = os.path.join(os.getcwd(), "whatsapp_monitor")
+    if not os.path.exists(monitor_dir):
+        log.warning(f"whatsapp_monitor directory not found at {monitor_dir}. Skipping monitor.")
+        return None
+
+    log.info("Starting WhatsApp monitor (Node.js)...")
+    try:
+        # Use 'node' on Linux/Mac, 'node.exe' on Windows if needed, 
+        # but 'node' usually works if it's in PATH.
+        process = subprocess.Popen(
+            ["node", "index.js"],
+            cwd=monitor_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        # Non-blocking log relay
+        def relay_logs():
+            for line in iter(process.stdout.readline, ""):
+                if line:
+                    print(f" [NODE] {line.strip()}")
+            process.stdout.close()
+
+        import threading
+        threading.Thread(target=relay_logs, daemon=True).start()
+        
+        return process
+    except Exception as e:
+        log.error(f"Failed to start Node.js monitor: {e}")
+        return None
+
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 async def main() -> None:
@@ -172,6 +215,10 @@ async def main() -> None:
     bridge.init_bridge(client, sigma_entity, seen_cas, persist_ca)
     await bridge.start_bridge_server(config.BRIDGE_PORT)
 
+    # Automatically start the Node.js monitor
+    node_proc = start_node_monitor()
+
+
     monitored, title_cache = await resolve_groups(client)
     if not monitored:
         log.error("No groups resolved. Check MONITORED_GROUPS in .env. Exiting.")
@@ -182,7 +229,18 @@ async def main() -> None:
     register_handler(client, sigma_entity, monitored_ids, title_cache)
 
     log.info(f"Listening on {len(monitored_ids)} group(s). Waiting for CAs...")
-    await client.run_until_disconnected()
+    
+    try:
+        await client.run_until_disconnected()
+    finally:
+        if 'node_proc' in locals() and node_proc:
+            log.info("Stopping Node.js monitor...")
+            node_proc.terminate()
+            try:
+                node_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                node_proc.kill()
+
 
 
 if __name__ == "__main__":
