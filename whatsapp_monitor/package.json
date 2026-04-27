@@ -1,0 +1,17 @@
+{
+  "name": "whatsapp-ca-monitor",
+  "version": "1.0.0",
+  "description": "WhatsApp group listener — detects contract addresses and forwards to TG bot via bridge",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "pino": "^9.0.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
