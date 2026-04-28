@@ -8,16 +8,14 @@ from aiohttp import web
 
 log = logging.getLogger(__name__)
 
-_client = None
-_sigma_entity = None
+_senders: list = []   # list of (TelegramClient, entity) tuples
 _seen_cas: set = set()
 _persist_ca = None
 
 
-def init_bridge(client, sigma_entity, seen_cas: set, persist_ca) -> None:
-    global _client, _sigma_entity, _seen_cas, _persist_ca
-    _client = client
-    _sigma_entity = sigma_entity
+def init_bridge(senders: list, seen_cas: set, persist_ca) -> None:
+    global _senders, _seen_cas, _persist_ca
+    _senders = senders
     _seen_cas = seen_cas
     _persist_ca = persist_ca
 
@@ -40,15 +38,24 @@ async def _handle_forward(request: web.Request) -> web.Response:
         return web.json_response({"status": "dup"})
 
     log.info(f"[WA-DETECTED]  {chain} | {ca} | src: {source}")
-    try:
-        await _client.send_message(_sigma_entity, ca)
+    sent = False
+    errors = []
+    for sender_client, entity in _senders:
+        try:
+            await sender_client.send_message(entity, ca)
+            name = getattr(entity, "username", None) or str(entity.id)
+            log.info(f"[WA-FORWARDED] {chain} | {ca} -> {name}")
+            sent = True
+        except Exception as e:
+            name = getattr(entity, "username", None) or str(entity.id)
+            log.error(f"[WA-SEND-FAIL] {ca} -> {name}: {e}")
+            errors.append(str(e))
+
+    if sent:
         _seen_cas.add(ca)
         await _persist_ca(ca)
-        log.info(f"[WA-FORWARDED] {chain} | {ca} -> {_sigma_entity.username or _sigma_entity.id}")
         return web.json_response({"status": "ok"})
-    except Exception as e:
-        log.error(f"[WA-SEND-FAIL] {ca}: {e}")
-        return web.json_response({"status": "error", "reason": str(e)}, status=500)
+    return web.json_response({"status": "error", "reason": "; ".join(errors)}, status=500)
 
 
 async def start_bridge_server(port: int = 5050) -> web.AppRunner:

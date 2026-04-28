@@ -19,9 +19,13 @@ def _list(key: str) -> list[str]:
 API_ID: int = int(_require("API_ID"))
 API_HASH: str = _require("API_HASH")
 PHONE_NUMBER: str = _require("PHONE_NUMBER")
-# Optional until groups are chosen; required once monitoring starts
 SIGMA_BOT: str = os.getenv("SIGMA_BOT_USERNAME", "").strip()
 MONITORED_GROUPS: list[str] = _list("MONITORED_GROUPS")
 DEDUP_FILE: str = os.getenv("DEDUP_FILE", "seen_cas.txt").strip()
 SESSION_NAME: str = os.getenv("SESSION_NAME", "sigma_watcher").strip()
 BRIDGE_PORT: int = int(os.getenv("BRIDGE_PORT", "5050"))
+
+# Friend's account — only phone number needed, reuses your API_ID and API_HASH
+FRIEND_PHONE_NUMBER: str = os.getenv("FRIEND_PHONE_NUMBER", "").strip()
+FRIEND_SIGMA_BOT: str = os.getenv("FRIEND_SIGMA_BOT_USERNAME", "").strip()
+FRIEND_SESSION_NAME: str = os.getenv("FRIEND_SESSION_NAME", "friend_watcher").strip()

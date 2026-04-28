@@ -69,10 +69,10 @@ async def list_all_groups(client: TelegramClient) -> None:
         entity = dialog.entity
         if isinstance(entity, Channel):
             kind = "Supergroup" if entity.megagroup else "Channel"
-            env_id = str(dialog.id)          # already -100XXXXXXXXXX in Telethon
+            env_id = str(dialog.id)
         elif isinstance(entity, Chat):
             kind = "Group"
-            env_id = str(dialog.id)          # already negative
+            env_id = str(dialog.id)
         else:
             continue
 
@@ -90,8 +90,6 @@ async def list_all_groups(client: TelegramClient) -> None:
 # ── Group resolution ───────────────────────────────────────────────────────────
 
 async def resolve_groups(client: TelegramClient) -> tuple[list, dict[int, str]]:
-    """Returns (entities, title_cache) — title_cache pre-populated to avoid
-    any get_chat() call inside the event handler hot path."""
     resolved = []
     title_cache: dict[int, str] = {}
     for raw in config.MONITORED_GROUPS:
@@ -110,14 +108,15 @@ async def resolve_groups(client: TelegramClient) -> tuple[list, dict[int, str]]:
 
 def register_handler(
     client: TelegramClient,
-    sigma_entity,
+    senders: list,   # list of (TelegramClient, entity) tuples
     monitored_ids: set[int],
     title_cache: dict[int, str],
 ) -> None:
+    sender_bot_ids = {entity.id for _, entity in senders}
+
     @client.on(events.NewMessage(chats=list(monitored_ids)))
     async def on_message(event: events.NewMessage.Event) -> None:
-        # Fast loop-guard: sender_id is available immediately, no network call
-        if event.sender_id == sigma_entity.id:
+        if event.sender_id in sender_bot_ids:
             return
 
         text = event.raw_text
@@ -128,7 +127,6 @@ def register_handler(
         if not cas:
             return
 
-        # Title was pre-populated at startup — zero awaits in the hot path
         chat_title = title_cache.get(event.chat_id, str(event.chat_id))
 
         for ca, chain in cas:
@@ -138,13 +136,19 @@ def register_handler(
 
             log.info(f"[DETECTED]  {chain} | {ca} | src: {chat_title}")
 
-            try:
-                await client.send_message(sigma_entity, ca)
+            sent = False
+            for sender_client, entity in senders:
+                try:
+                    await sender_client.send_message(entity, ca)
+                    name = getattr(entity, "username", None) or str(entity.id)
+                    log.info(f"[FORWARDED] {chain} | {ca} -> {name}")
+                    sent = True
+                except Exception as e:
+                    log.error(f"[SEND-FAIL] {ca} -> {getattr(entity, 'username', entity.id)}: {e}")
+
+            if sent:
                 seen_cas.add(ca)
-                await persist_ca(ca)   # non-blocking file write
-                log.info(f"[FORWARDED] {chain} | {ca} -> {config.SIGMA_BOT}")
-            except Exception as e:
-                log.error(f"[SEND-FAIL] {ca}: {e} — will retry on next occurrence")
+                await persist_ca(ca)
 
 
 # ── Node Monitor ───────────────────────────────────────────────────────────────
@@ -158,8 +162,6 @@ def start_node_monitor():
 
     log.info("Starting WhatsApp monitor (Node.js)...")
     try:
-        # Use 'node' on Linux/Mac, 'node.exe' on Windows if needed, 
-        # but 'node' usually works if it's in PATH.
         process = subprocess.Popen(
             ["node", "index.js"],
             cwd=monitor_dir,
@@ -169,7 +171,6 @@ def start_node_monitor():
             bufsize=1
         )
 
-        # Non-blocking log relay
         def relay_logs():
             for line in iter(process.stdout.readline, ""):
                 if line:
@@ -178,12 +179,11 @@ def start_node_monitor():
 
         import threading
         threading.Thread(target=relay_logs, daemon=True).start()
-        
+
         return process
     except Exception as e:
         log.error(f"Failed to start Node.js monitor: {e}")
         return None
-
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -195,7 +195,6 @@ async def main() -> None:
     await client.start(phone=config.PHONE_NUMBER)
     log.info("Client authenticated.")
 
-    # Always show all groups/channels on startup
     await list_all_groups(client)
 
     if not config.MONITORED_GROUPS:
@@ -211,13 +210,22 @@ async def main() -> None:
     sigma_entity = await client.get_entity(config.SIGMA_BOT)
     log.info(f"Sigma bot resolved: {config.SIGMA_BOT} (id={sigma_entity.id})")
 
-    # Start WhatsApp→Telegram bridge (used by whatsapp_monitor/index.js)
-    bridge.init_bridge(client, sigma_entity, seen_cas, persist_ca)
+    senders = [(client, sigma_entity)]
+
+    # Friend's account — optional second sender, reuses same API_ID and API_HASH
+    friend_client = None
+    if config.FRIEND_PHONE_NUMBER and config.FRIEND_SIGMA_BOT:
+        friend_client = TelegramClient(config.FRIEND_SESSION_NAME, config.API_ID, config.API_HASH)
+        await friend_client.start(phone=config.FRIEND_PHONE_NUMBER)
+        log.info("Friend client authenticated.")
+        friend_sigma_entity = await friend_client.get_entity(config.FRIEND_SIGMA_BOT)
+        log.info(f"Friend's sigma bot resolved: {config.FRIEND_SIGMA_BOT} (id={friend_sigma_entity.id})")
+        senders.append((friend_client, friend_sigma_entity))
+
+    bridge.init_bridge(senders, seen_cas, persist_ca)
     await bridge.start_bridge_server(config.BRIDGE_PORT)
 
-    # Automatically start the Node.js monitor
     node_proc = start_node_monitor()
-
 
     monitored, title_cache = await resolve_groups(client)
     if not monitored:
@@ -226,21 +234,22 @@ async def main() -> None:
         return
 
     monitored_ids = {e.id for e in monitored}
-    register_handler(client, sigma_entity, monitored_ids, title_cache)
+    register_handler(client, senders, monitored_ids, title_cache)
 
     log.info(f"Listening on {len(monitored_ids)} group(s). Waiting for CAs...")
-    
+
     try:
         await client.run_until_disconnected()
     finally:
-        if 'node_proc' in locals() and node_proc:
+        if node_proc:
             log.info("Stopping Node.js monitor...")
             node_proc.terminate()
             try:
                 node_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 node_proc.kill()
-
+        if friend_client:
+            await friend_client.disconnect()
 
 
 if __name__ == "__main__":
